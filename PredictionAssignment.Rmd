@@ -1,0 +1,166 @@
+---
+title: "Prediction Assignment"
+author: "STP"
+date: "12/16/2020"
+output: html_document
+---
+
+```{r setup, message = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(fig.path = "figs/fig-")
+library(caret)
+library(dplyr)
+library(randomForest)
+library(rpart)
+library(rattle)
+library (RCurl)
+set.seed(12345)
+```
+
+## Getting the Data
+
+The data for this assigment was downloaded from the URLs given in the assignment. Information about these data was found here:
+http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har
+
+These data contain motion variables from sensors placed on the subjects' upper arm, forearm, and belt, as well as information from the dumbbell. The column "classe" indicates how the movement was executed, and is what our model must predict for the test set. The R code below indicates that classe is a character variable and has five unique values: A, B, C, D, and E. The web site above indicates that A corresponds to correct execution of the exercise, while the other 4 options correspond to different incorrect executions of the exercise. The classe needs to be converted to a factor variable for later methods to work.
+
+
+```{r get data}
+traindl <- getURL("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv")
+training <- read.csv (text = traindl)
+
+testdl <- getURL("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv")
+testing <- read.csv (text = testdl)
+
+str(training)
+class(training$classe)
+unique(training$classe)
+
+## must convert classe in the training set to a factor variable
+training <- mutate(training, classe = as.factor(classe))
+
+```
+
+## Cleaning the Data
+
+The data sets contain 160 variables, which will be too many to use for the prediction models based on computation.
+
+First, we will remove columns with very little variance because variables without variance will not be useful in making predictions.
+
+```{r remove Near Zero Variance Variables}
+myDataNZV <- nearZeroVar(training, saveMetrics=TRUE)
+cols <- filter(myDataNZV, nzv == "TRUE")
+NZVcols <- row.names(cols)
+mytraining <- select(training, -all_of(NZVcols))
+mytesting <- select(testing, -all_of(NZVcols))
+```
+
+Next, we will remove columns that have a large number of NA values, as these will not be useful in the prediction analysis.
+
+```{r remove columns with >60% NA}
+# Function to remove columns with > 60% NA
+removedNAsColumns <- function(df) {
+  numRows <- nrow(df)
+  missingDf <- is.na(df)
+  removedColumns = which(colSums(missingDf) > numRows*60/100)
+  # might be possible that none of the columns meet the threshold
+  if (length(removedColumns) > 0) {
+    colNames <- names(removedColumns)
+    df <- select(df, -all_of(colNames))
+  }
+  df
+}
+
+## applying this function does assume that the same columns in the training and test sets will have >60% NAs
+mytraindf <- removedNAsColumns(mytraining)
+mytestdf <- removedNAsColumns(mytesting)
+
+```
+To confirm that the same columns were removed from each data frame, we compare the column names to each other. The last column in the two data frames is different, so we expect one column name to differ between the two data frames.
+
+```{r compare column names}
+x <- colnames(mytraindf)
+y <- colnames(mytestdf)
+both <- x == y
+a <- ncol(mytraindf)
+b <- ncol(mytestdf)
+c <- sum(both)
+```
+The processed training data set has `r a` columns, the processed testing data set has `r b` columns, and the two data sets share `r c` column names in common, which is what was expected.
+
+Looking at the column names in the data frames, we can see there are some columns that will not contribute meaningfully to the prediction, such as X, the user name, and various time stamps. These columns are removed.
+
+```{r remove columns not related to motion}
+mytraindf <- select(mytraindf, -c(1:6))
+mytestdf <- select(mytestdf, -c(1:6))
+
+```
+
+
+## Create a Partition in the Training Set
+
+The training set was split into a training set and a testing set withint the larger training set in order to use model stacking in the prediction process.
+
+```{r create training and "testing" sets}
+set.seed(12345)
+inTrain = createDataPartition(mytraindf$classe, p = 3/4)[[1]]
+train1 = mytraindf[ inTrain,]
+test1 = mytraindf[-inTrain,]
+```
+
+## Creating Models to Predict classe
+
+## Random Forest Model
+
+First, a Random Forest Model is applied to the training set.
+
+```{r random forest}
+rfModel <- randomForest(classe~., data=train1)
+rfModel
+```
+
+This model is used to predict outcomes for the "test" set that is really part of the original training set.
+
+```{r predict RF}
+RFpred <- predict(rfModel, newdata = test1)
+RFConMat <- confusionMatrix(RFpred, test1$classe)
+RFConMat
+RFAcc <- RFConMat$overall[1]
+```
+
+The accuracy of the random forest predictor is `r RFAcc` when applied to the test partition of the training set.
+
+## Decision Tree Model
+
+Then a decision tree model is fit to the training set.
+
+```{r decision tree}
+set.seed(12345)
+dtModel <- train(classe ~ .,method="rpart",data=train1)
+dtModel
+
+fancyRpartPlot(dtModel$finalModel)
+```
+
+
+This model is used to predict outcomes for the "test" set that is really part of the original training set.
+
+```{r decision tree predictions}
+DTpred <- predict(dtModel, newdata = test1)
+DTConMat <- confusionMatrix(DTpred, test1$classe)
+DTConMat
+DTAcc <- DTConMat$overall[1]
+```
+
+The accuracy of the decision tree predictor is `r DTAcc` when applied to the test partition of the training set. This is poor accuracy for prediction, so the Random Forest method will be used to predict outcomes of the actual test set. Originally, I had planned to stack the two models to improve the outcome, but given the very high accuracy of the random forest method when applied to the "test" set within the training set and the low accuracy for the decision tree model, stacking the models seems unlikely to improve the overall predictions.
+
+## Predictions for the Test Set
+
+The Random Forest model was used to predict the classe for the observations for the test set.
+
+```{r predictions}
+pred <- predict(rfModel, newdata = mytestdf)
+pred
+
+```
+
